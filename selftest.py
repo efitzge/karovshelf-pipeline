@@ -1,0 +1,554 @@
+"""Exercise everything except the paid vision call.
+
+Feeds deliberately noisy spine readings - the kind of OCR damage a real photo
+produces - through dedupe, catalogue matching, and reporting. The question it
+answers: does the catalogue lookup actually rescue a misread, or does garbage
+in stay garbage out?
+"""
+
+from PIL import Image
+
+from pipeline import enrich, genre_classify, imageprep, report
+from pipeline.extract import ExtractedBook
+
+# Each tuple is (spine_text, title-as-read, author-as-read, legibility).
+# The damage is modelled on what actually goes wrong: dropped and swapped
+# characters, missing authors, subtitle noise, and one pure hallucination.
+NOISY_READINGS = [
+    ("KAFKA ON THE SHORE  MURAKAMI  VINTAGE", "Kafka on the Shore", "Murakami", "clear"),
+    ("KAFKA 0N THE SH0RE MURAKAM1", "Kafka on the Shore", "Murakami", "partial"),
+    ("TH3 REM4INS OF THE DAY  ISHIGURO", "The Remains of the Day", "Ishiguro", "partial"),
+    # Expected to come back UNMATCHED since AUTHOR_CORROBORATION_FLOOR was
+    # added (2026-09-03) - not a regression, a disclosed tradeoff. A bare
+    # surname against a full name ("Harari" vs "Yuval Noah Harari") scores
+    # 0.522 by similarity() - almost identical to a real, confirmed
+    # COINCIDENTAL surname collision found the same day ("Brown" vs
+    # "William P. Brown", an unrelated author on an unrelated book, scored
+    # 0.5). No threshold value can accept one and reject the other; nothing
+    # in the title or author text distinguishes "same person, abbreviated"
+    # from "different person, same common surname" without outside
+    # knowledge of which surnames are actually rare. Given the project's own
+    # standing rule (a wrong match is worse than an unmatched one), this
+    # sides with rejecting both - see PROJECT_SUMMARY.md Sec10, 2026-09-03,
+    # for the full false-match investigation this came out of.
+    ("SAP1ENS  A BRIEF H1STORY 0F HUMANKIND  HARARI",
+     "Sapiens: A Brief History of Humankind", "Harari", "partial"),
+    ("WOLF HALL   MANTEL", "Wolf Hall", "Hilary Mantel", "clear"),
+    ("THE GOLDF?NCH  D?NNA TARTT", "The Goldfinch", "Donna Tartt", "partial"),
+    ("N0RMAL PE0PLE", "Normal People", None, "partial"),
+    ("?????  ??????", "Selected Poems", None, "guess"),
+    ("EDUCATED  WESTOVER", "Educated", "Westover", "clear"),
+    ("A GENTLEMAN IN M0SC0W  T0WLES", "A Gentleman in Moscow", "Towles", "partial"),
+    ("PACHINK0  MIN JIN LEE", "Pachinko", "Min Jin Lee", "clear"),
+    ("THE THURSDAY MURDER CLUB  OSMAN", "The Thursday Murder Club", "Richard Osman", "clear"),
+    ("QRZTL FLMBX ZZQ", "Qrztl Flmbx", None, "guess"),
+]
+
+
+def check_tiling():
+    print("== tiling ==")
+    # A typical wide bookcase photo.
+    shelf = Image.new("RGB", (4032, 1200), "white")
+    tiles = imageprep.tile_image(shelf, source="fake-shelf.jpg")
+    print("  4032x1200 shelf -> {} tiles".format(len(tiles)))
+    for tile in tiles:
+        print("     {} at {} (~{:,} tokens)".format(
+            tile.label, tile.image.size, tile.estimated_tokens()))
+
+    # Verify the overlap actually covers the full width.
+    assert len(tiles) >= 3, "a wide shelf should produce several tiles"
+    assert all(max(t.image.size) <= 1568 for t in tiles), "tile exceeds max edge"
+
+    # A single tall shelf should stay whole.
+    tall = Image.new("RGB", (900, 1400), "white")
+    one = imageprep.tile_image(tall, source="tall.jpg")
+    assert len(one) == 1, "a portrait shelf should not be sliced"
+    print("  900x1400 shelf -> 1 tile (correct, no slicing)")
+    print()
+
+
+def check_dedupe_chaining():
+    """Guard against clusters drifting across the title space.
+
+    Greedy fuzzy merging is single-linkage: A merges with B and B with C, so A
+    and C can end up together even though they are unrelated. It gets far worse
+    if the cluster adopts each new title, because its comparison anchor then
+    wanders. On a real 759-reading run that produced two clusters holding 218
+    and 202 unrelated books - silently destroying most of the catalogue.
+    """
+    print("== dedupe chain resistance ==")
+    chain = ["The Art of War", "The Art of Wart", "The Art of Warts",
+             "The Part of Warts", "The Part of Hearts", "The Park of Hearts",
+             "The Dark of Hearts", "The Dark of Hearth", "The Dark of Earth"]
+    books = [
+        ExtractedBook(spine_text="", title=title, author=None,
+                      legibility="clear" if i else "guess",
+                      orientation="vertical", source="t", seen_in=["t"])
+        for i, title in enumerate(chain)
+    ]
+    merged = enrich.dedupe(books)
+    worst = max(m.times_seen for m in merged)
+    print("  {} chained titles -> {} clusters, largest holds {}".format(
+        len(chain), len(merged), worst))
+    assert worst <= 3, "a cluster ran away and absorbed {} books".format(worst)
+    assert len(merged) >= 4, "chain collapsed too far"
+    print("  no runaway cluster")
+    print()
+
+
+def check_volume_number_guard():
+    """Different volumes of the same series must never merge, even though
+    their titles are otherwise near-identical - found 2026-09-03 on real
+    scans: "Kitzur Shulchan Aruch I" vs "...II" (similarity 0.979) and four
+    Sandman volumes ("Vol. 7" through "Vol. 10", pairwise 0.889-0.923) both
+    cleared DEDUPE_THRESHOLD (0.88) and silently collapsed to one survivor
+    each, losing real books. `_trailing_volume_marker` in pipeline/enrich.py
+    blocks a merge whenever both titles end in a bare volume/part number
+    (arabic or roman) and those numbers disagree.
+    """
+    print("== volume-number dedupe guard ==")
+
+    def entry(title, author="Author"):
+        return ExtractedBook(spine_text="", title=title, author=author,
+                             legibility="clear", orientation="vertical",
+                             source="t", seen_in=["t"])
+
+    kitzur = enrich.dedupe([entry("Kitzur Shulchan Aruch I"), entry("Kitzur Shulchan Aruch II")])
+    assert len(kitzur) == 2, "Vol. I and Vol. II must stay separate, not merge into one"
+    print("  Kitzur Shulchan Aruch I / II -> 2 distinct records")
+
+    sandman = enrich.dedupe([entry("The Sandman, Vol. 10", "Neil Gaiman"),
+                             entry("The Sandman, Vol. 9", "Neil Gaiman"),
+                             entry("The Sandman, Vol. 8", "Neil Gaiman"),
+                             entry("The Sandman, Vol. 7", "Neil Gaiman")])
+    assert len(sandman) == 4, "all four Sandman volumes must survive as distinct records"
+    print("  Sandman Vol. 7/8/9/10 -> 4 distinct records")
+
+    # Must NOT block a genuine repeat read of the exact same volume.
+    same_vol = enrich.dedupe([entry("The Sandman, Vol. 10", "Neil Gaiman"),
+                              entry("The Sandman, Vol. 10", "Neil Gaiman")])
+    assert len(same_vol) == 1, "two readings of the SAME volume must still merge"
+    print("  two readings of the same volume -> still merges to 1")
+
+    # The classic Biblical/Judaica split-book convention puts the numeral
+    # FIRST, not last ("I Kings" vs "II Kings") - almost merged for real on
+    # 2026-09-03 (similarity 0.933) before this leading-token check was added.
+    kings = enrich.dedupe([entry("I Kings"), entry("II Kings")])
+    assert len(kings) == 2, "I Kings and II Kings must stay separate, not merge into one"
+    print("  I Kings / II Kings -> 2 distinct records")
+    print()
+
+
+def check_catalogue_match_disambiguation():
+    """Guard against binding a short/generic title to a completely unrelated
+    real book, when there's no author on the scan to catch it.
+
+    Found on real scans 2026-09-03, all with no (or only a coincidentally-
+    similar) author on the spine to cross-check: "Isaiah" (a Maggid Tanakh
+    commentary) matched a biography titled "Isaiah Berlin"; "Jonah" matched
+    a horror novel called "The Jonah" (an exact match once `normalise()`
+    strips the leading "The"); "Ecclesiastes" matched an unrelated
+    commentary-series book whose author ("William P. Brown") happened to
+    share a surname (0.5 similarity - a real coincidence, not agreement);
+    "A Citizen's Guide to the Economy" matched an Armenian government
+    budget guide. `_score_candidate` (pipeline/enrich.py) exists to reject
+    all of these while still accepting genuine short-title matches (both
+    with and without an author on the scan).
+    """
+    print("== catalogue match disambiguation ==")
+    from pipeline import config
+    from pipeline.enrich import CatalogueRecord, _score_candidate
+
+    def rec(title, author=None):
+        return CatalogueRecord(raw_title=title, raw_author=author, spine_text="",
+                               legibility="clear", seen_in=["t"])
+
+    false_matches = [
+        ("Jonah (no author)", rec("Jonah"), "The Jonah", ["James Herbert"]),
+        ("Isaiah (no author)", rec("Isaiah"), "Isaiah Berlin", ["Michael Ignatieff"]),
+        ("Ecclesiastes/Brown vs unrelated William P. Brown book",
+         rec("Ecclesiastes", "Brown"),
+         "Ecclesiastes (Interpretation, a Bible Commentary for Teaching and Preaching)",
+         ["William P. Brown"]),
+        ("A Citizen's Guide to the Economy (no author)", rec("A Citizen's Guide to the Economy"),
+         "A citizen's guide to the budget", ["Armenia Finance Ministry"]),
+    ]
+    for label, record, cand_title, cand_authors in false_matches:
+        score = _score_candidate(record, cand_title, cand_authors)
+        assert score is None, "{} must be rejected, got score {}".format(label, score)
+        print("  {} -> correctly rejected".format(label))
+
+    legit_matches = [
+        ("Sapiens/Harari vs full-subtitle catalogue entry, same author",
+         rec("Sapiens", "Yuval Noah Harari"),
+         "Sapiens: A Brief History of Humankind", ["Yuval Noah Harari"]),
+        ("Dune (no author) vs exact same-length title", rec("Dune"), "Dune", ["Frank Herbert"]),
+    ]
+    for label, record, cand_title, cand_authors in legit_matches:
+        score = _score_candidate(record, cand_title, cand_authors)
+        assert score is not None and score >= config.MATCH_THRESHOLD, \
+            "{} should still match, got {}".format(label, score)
+        print("  {} -> still matches ({:.3f})".format(label, score))
+    print()
+
+
+def check_repetition_guard():
+    """Guard against a runaway generation loop silently eating a tile.
+
+    Observed on real scans in two shapes. The first time: the model gets stuck
+    repeating one well-formed title (74x-218x in separate cases) until its
+    output budget runs out, after reading a handful of real books correctly.
+    The second time, after adding repeat_penalty as what seemed like an obvious
+    mitigation: the loop still happened, but the model got penalised for
+    reusing title tokens it had already spent on spine_text, so it emitted a
+    correctly-shaped but EMPTY title for every entry - which our own filter
+    then silently dropped, turning a detectable failure into an invisible one
+    (a tile with 5 real, legible books reported 0, with no warning at all).
+    repeat_penalty was removed; detection now runs on spine_text, which stays
+    populated in both failure shapes, and runs BEFORE the empty-title filter.
+
+    Either shape must strip the loop down to one copy and flag the tile - and
+    neither check may fire on a shelf that genuinely holds two physical copies
+    of the same book sitting together.
+    """
+    print("== repetition-loop guard ==")
+    import json
+    from pipeline.providers import process_reply
+
+    def entry(spine, title="", author=None):
+        return {"spine_text": spine, "title": title, "author": author,
+                "legibility": "clear", "orientation": "vertical"}
+
+    # Shape 1: well-formed repeated titles (the original failure).
+    well_formed = json.dumps({"books": [entry("A", "Real Book One", "X")]
+                              + [entry("B", "Looping Title", "Y")] * 74})
+    books1, truncated1 = process_reply(well_formed)
+    assert truncated1, "a 74x well-formed repeat must be detected as a loop"
+    assert len(books1) == 2, "the loop should collapse to a single copy"
+    print("  74x well-formed repeat -> collapsed to {}, flagged".format(len(books1)))
+
+    # Shape 2: the empty-title degenerate case that repeat_penalty produced.
+    # If detection ran on `title` instead of `spine_text`, or ran after the
+    # empty-title filter instead of before, this would silently report 0 books
+    # with no warning - exactly the regression that shipped once already.
+    degenerate = json.dumps({"books": [entry("LADIES AND GENTLEMEN OF THE JURY")]
+                             + [entry("A GUIDE TO THE MODEL CODE")] * 30})
+    books2, truncated2 = process_reply(degenerate)
+    assert truncated2, ("an empty-title loop must still be flagged - this is "
+                        "the exact regression a repeat_penalty mitigation caused")
+    print("  30x empty-title repeat -> flagged (not silently reported as 0)")
+
+    # Must not fire on a shelf that genuinely holds 2 copies of one title -
+    # these have different spine_text (different physical crops of the spine).
+    legit = json.dumps({"books": [
+        entry("SIDE1", "Where the Sidewalk Ends", "Silverstein"),
+        entry("ATTIC", "A Light in the Attic", "Silverstein"),
+        entry("SIDE2", "Where the Sidewalk Ends", "Silverstein"),
+    ]})
+    books3, truncated3 = process_reply(legit)
+    assert not truncated3, "two genuine copies must not be flagged as a loop"
+    assert len(books3) == 3, "genuine duplicates must survive untouched"
+    print("  2 genuine duplicate copies -> left alone, not flagged")
+
+    # Judaica-shaped repeats get a relaxed ceiling (20, not 3) - found
+    # 2026-08-26 on a real phone-uploaded batch with a dozen identical
+    # Haggadahs bought in bulk for Seder guests, false-flagged as a loop.
+    haggadahs = json.dumps({"books":
+        [entry("Haggadah", "Haggadah", "Various")] * 12})
+    books4, truncated4 = process_reply(haggadahs)
+    assert not truncated4, "12 real bulk-bought Haggadahs must not be flagged as a loop"
+    assert len(books4) == 12, "all 12 must survive uncollapsed - dedupe happens later, in enrich.dedupe"
+    print("  12x genuine bulk Haggadahs -> left alone, not flagged")
+
+    # But the safety net must still catch an actual runaway loop even when the
+    # looping text happens to be Judaica-shaped - 20 is a relaxed ceiling, not
+    # no ceiling at all.
+    haggadah_loop = json.dumps({"books":
+        [entry("Haggadah", "Haggadah", "Various")] * 60})
+    books5, truncated5 = process_reply(haggadah_loop)
+    assert truncated5, "a 60x Judaica-shaped repeat is still a runaway loop, not bulk buying"
+    print("  60x Haggadah repeat -> still flagged as a loop")
+    print()
+
+
+def check_salvage_keeps_spine_only_entries():
+    """Guard against a truncated reply with no usable *title* being thrown
+    away entirely, when it still had usable *spine_text*.
+
+    Real failure, root-caused 2026-08-25 on IMG_7103.jpeg's r1c1 tile - not a
+    bookshelf at all, a stack of loose paper folders. The model read one
+    illegible label into spine_text ("USA"), then degenerated into repeating
+    `{"spine_text": "", "title": ""}` for the rest of its output budget and
+    got cut off mid-string (num_predict truncation), so the whole reply was
+    invalid JSON. `_salvage_objects` fell back to scanning for balanced
+    `{...}` objects - reasonable - but only kept ones with a non-empty
+    `title`, so it discarded every single one, including the one with real
+    content in `spine_text`, and raised "unparseable JSON and nothing
+    salvageable". `_finalise_books` would have dropped the title-less entry
+    anyway, so the correct end result is "0 books, no error" (a genuinely
+    bookless crop), not a hard tile failure demanding a human look at it.
+    """
+    print("== salvage keeps spine-only entries ==")
+    from pipeline.providers import process_reply, ProviderError
+
+    # A hand-built truncated reply in the same shape as the real capture:
+    # one entry with real spine_text but no title, then filler with neither,
+    # cut off mid-string before the object ever closes.
+    truncated_reply = (
+        '{\n  "books": [\n'
+        '    {"spine_text": "USA", "title": "", "author": "", '
+        '"legibility": "guess", "orientation": "vertical"},\n'
+        '    {"spine_text": "", "title": "", "author": "", '
+        '"legibility": "guess", "orientation": "vertical"},\n'
+        '    {"spine_text": "", "title": "", "author": "", '
+        '"legibility": "guess", "orientation": "vertical"},\n'
+        '    {\n      "spine_text": "'
+    )
+
+    try:
+        books, truncated = process_reply(truncated_reply)
+    except ProviderError as exc:
+        raise AssertionError(
+            "a bookless-crop truncation should resolve to 0 books, not raise: {}".format(exc)
+        ) from exc
+
+    assert books == [], "a title-less salvage should still end up empty after _finalise_books"
+    print("  truncated reply with spine-only content -> 0 books, no error")
+    print()
+
+
+def check_genre_classify():
+    """Guard the batched end-of-scan genre classification pass's pure logic -
+    which books get sent to the model, how the prompt numbers them, and how
+    a reply gets validated back - without making a real Ollama call (that
+    stays untested here, same as every other live model call in this file).
+
+    Real problem this exists to fix: ~45% of matched books come back
+    "Uncategorised" because catalogue subject tags are noisy or absent, even
+    when the resolved title/author alone would be enough to guess a genre.
+    """
+    print("== genre classification (batched LLM pass) ==")
+    from pipeline.enrich import CatalogueRecord
+
+    has_subjects = CatalogueRecord(
+        raw_title="Dune", raw_author="Herbert", spine_text="DUNE HERBERT",
+        legibility="clear", seen_in=["t"], title="Dune", authors=["Frank Herbert"],
+        subjects=["science fiction", "adventure"],
+    )
+    needs_llm = CatalogueRecord(
+        raw_title="Educated", raw_author="Westover", spine_text="EDUCATED WESTOVER",
+        legibility="clear", seen_in=["t"], title="Educated", authors=["Tara Westover"],
+        subjects=[],
+    )
+    nothing_to_classify = CatalogueRecord(
+        raw_title="", raw_author=None, spine_text="???",
+        legibility="guess", seen_in=["t"], subjects=[],
+    )
+
+    records = [has_subjects, needs_llm, nothing_to_classify]
+    candidates = genre_classify._candidates(records)
+    assert candidates == [needs_llm], (
+        "only the record with no keyword-classifiable subjects (and a real "
+        "title) should be sent to the model"
+    )
+    print("  {} of {} records need the LLM pass".format(len(candidates), len(records)))
+
+    prompt = genre_classify._build_prompt(candidates)
+    assert prompt == "0. Educated - Tara Westover", "prompt must number from 0, matching response indices"
+    print("  prompt numbering: {!r}".format(prompt))
+
+    import json
+    good = json.dumps({"assignments": [{"index": 0, "genre": "Biography & History"}]})
+    assert genre_classify._parse_response(good, 1) == {0: "Biography & History"}
+
+    out_of_range = json.dumps({"assignments": [{"index": 5, "genre": "Romance"}]})
+    assert genre_classify._parse_response(out_of_range, 1) == {}, "an out-of-range index must be dropped"
+
+    invented_genre = json.dumps({"assignments": [{"index": 0, "genre": "Self-Help"}]})
+    assert genre_classify._parse_response(invented_genre, 1) == {}, (
+        "a genre outside the fixed vocabulary must be dropped, not passed through"
+    )
+
+    truncated = '{"assignments": [{"index": 0, "genre": "Rom'
+    assert genre_classify._parse_response(truncated, 1) == {}, (
+        "malformed/truncated JSON must degrade to no classifications, not raise"
+    )
+    print("  response validation: in-range+allowed kept, everything else dropped")
+
+    # End-to-end on the mutable field itself, bypassing the network call.
+    needs_llm.llm_genre = "Biography & History"
+    assert needs_llm.genre == "Biography & History", "llm_genre must win over the empty keyword result"
+    assert has_subjects.genre == "Sci-Fi & Fantasy", "a record the keyword classifier already handled is untouched"
+    print("  llm_genre correctly takes priority only when the keyword classifier found nothing")
+    print()
+
+
+def check_worker_routing():
+    """The auto-vs-escalate decision must catch each known bad signal alone,
+    and must not escalate a genuinely clean batch. This is a product decision
+    (thresholds in pipeline/worker.py), so it deserves its own explicit test
+    rather than being inferred from the pipeline tests above."""
+    print("== worker routing decision ==")
+    from pipeline.worker import decide_route
+
+    clean = {"distinct_books": 20, "matched": 18, "needs_review": 2,
+            "tiles_suspect": 0, "tiles_failed": 0}
+    status, reason = decide_route(clean)
+    assert status == "ready" and reason is None
+    print("  clean batch -> ready")
+
+    for flaw, patch in [
+        ("repetition loop", {"tiles_suspect": 1}),
+        ("hard-failed tile", {"tiles_failed": 1}),
+        ("low match rate", {"matched": 10}),
+        ("high needs_review", {"needs_review": 9}),
+    ]:
+        bad = dict(clean, **patch)
+        status, reason = decide_route(bad)
+        assert status == "needs_admin", "{} should have escalated".format(flaw)
+        print("  {} -> needs_admin ({})".format(flaw, reason))
+
+    status, reason = decide_route({"distinct_books": 0, "matched": 0,
+                                   "needs_review": 0, "tiles_suspect": 0,
+                                   "tiles_failed": 0})
+    assert status == "needs_admin"
+    print("  nothing extracted -> needs_admin")
+
+    # Judaica-majority batches get a relaxed match-rate floor and needs_review
+    # ceiling (see JUDAICA_MATCH_RATE_FLOOR/JUDAICA_NEEDS_REVIEW_CEILING) -
+    # found 2026-08-26 on a real Hirsch/Steinsaltz/Artscroll/Koren-heavy batch
+    # that hit 48% needs-review and would have escalated under the generic
+    # 40% ceiling for no reason other than being a Judaica-heavy household.
+    judaica_rough = {"distinct_books": 20, "matched": 10, "needs_review": 9,
+                     "tiles_suspect": 0, "tiles_failed": 0, "judaica_fraction": 0.8}
+    status, reason = decide_route(dict(judaica_rough, matched=10))  # 50% match rate
+    assert status == "ready", "50% match rate should clear the relaxed 40% Judaica floor"
+    print("  Judaica-majority batch, 50% match / 45% needs_review -> ready")
+
+    # Same shape, generic thresholds - proves the relaxation is real, not a no-op.
+    status, reason = decide_route(dict(judaica_rough, matched=10, judaica_fraction=0.0))
+    assert status == "needs_admin", "the same stats without judaica_fraction must still escalate"
+    print("  identical stats without judaica_fraction -> needs_admin (relaxation is Judaica-specific)")
+
+    # A Judaica batch can still be genuinely bad - the floor is relaxed, not removed.
+    status, reason = decide_route(dict(judaica_rough, matched=5, judaica_fraction=0.8))  # 25%
+    assert status == "needs_admin", "25% match rate is below even the relaxed Judaica floor"
+    print("  Judaica-majority batch, 25% match rate -> still needs_admin")
+    print()
+
+
+def check_manual_ingestion():
+    """The manual (admin-via-chat-UI) path must produce the same shape as
+    the automated providers, including tolerating a prose-wrapped reply -
+    that's exactly the format a chat UI actually returns."""
+    print("== manual ingestion path ==")
+    from pipeline.manual import build_manual_packet, books_to_extracted, ingest_manual_reply
+
+    packet = build_manual_packet("t1", ["a.jpg", "b.jpg"])
+    rendered = packet.render()
+    assert "a.jpg" in rendered and "b.jpg" in rendered
+    assert '"books"' in rendered
+    print("  packet includes photo list and schema")
+
+    pasted = ('Sure, here you go:\n```json\n'
+             '{"books": [{"spine_text": "DUNE", "title": "Dune", '
+             '"author": "Frank Herbert", "legibility": "clear", '
+             '"orientation": "vertical"}]}\n```\nAnything else?')
+    books, truncated = ingest_manual_reply(pasted)
+    assert not truncated and len(books) == 1 and books[0]["title"] == "Dune"
+    extracted = books_to_extracted(books, "manual:t1")
+    assert extracted[0].title == "Dune"
+    print("  prose-wrapped reply parses correctly, matches ExtractedBook shape")
+    print()
+
+
+def check_pipeline():
+    print("== dedupe + catalogue matching ==")
+    readings = [
+        ExtractedBook(spine_text=spine, title=title, author=author,
+                      legibility=leg, orientation="vertical",
+                      source="tile 1", seen_in=["tile 1"])
+        for spine, title, author, leg in NOISY_READINGS
+    ]
+    print("  {} raw readings in".format(len(readings)))
+
+    records = enrich.dedupe(readings)
+    print("  {} after merging duplicates".format(len(records)))
+    assert len(records) == len(readings) - 1, "the two Kafka readings should merge"
+
+    print("  querying Open Library / Google Books...")
+    errors = enrich.enrich(records)
+    if errors:
+        print("  lookup errors:", errors)
+
+    print()
+    print("  {:<38} {:<22} {:>6}  {}".format("AS READ", "MATCHED TO", "SCORE", "GENRE"))
+    print("  " + "-" * 92)
+    for record in records:
+        print("  {:<38} {:<22} {:>6}  {}".format(
+            record.raw_title[:37],
+            (record.title or "- no match -")[:21],
+            "{:.2f}".format(record.match_score) if record.matched else "-",
+            record.genre[:26],
+        ))
+
+    matched = sum(1 for r in records if r.matched)
+    review = sum(1 for r in records if r.needs_review)
+    print()
+    print("  matched {}/{}, {} flagged for review".format(matched, len(records), review))
+
+    # The nonsense reading must NOT match anything - that is the guard against
+    # the catalogue inventing a book to satisfy a bad OCR result.
+    nonsense = next(r for r in records if r.raw_title.startswith("Qrztl"))
+    assert not nonsense.matched, "nonsense should not match a real book"
+    print("  nonsense reading correctly rejected")
+
+    stats = {"tiles_processed": 4, "cost_usd": 0.0, "elapsed": 0.0}
+    with open("out/selftest.html", "w", encoding="utf-8") as handle:
+        handle.write(report.to_html(records, stats))
+    with open("out/selftest.json", "w", encoding="utf-8") as handle:
+        handle.write(report.to_json(records, stats))
+    print("  wrote out/selftest.html and out/selftest.json")
+    return records
+
+
+def check_create_testers_parsing():
+    """The batch tester-creation CLI's pure parsing logic - no live Supabase
+    call here, same as every other Admin-API-touching path in this file."""
+    print("== create_testers.py tester parsing ==")
+    from create_testers import generate_pin, parse_tester
+
+    name, email, neighbourhood = parse_tester("Sarah Cohen <sarah@example.com>")
+    assert (name, email, neighbourhood) == ("Sarah Cohen", "sarah@example.com", None)
+    print("  'Name <email>' -> name/email parsed, neighbourhood None")
+
+    name, email, neighbourhood = parse_tester("David Levy <david@example.com> @Anafa")
+    assert (name, email, neighbourhood) == ("David Levy", "david@example.com", "Anafa")
+    print("  'Name <email> @Neighbourhood' -> all three parsed")
+
+    try:
+        parse_tester("no angle brackets here")
+        raise AssertionError("a string with no <email> must be rejected")
+    except ValueError:
+        print("  malformed input (no <email>) -> rejected")
+
+    pin = generate_pin()
+    assert len(pin) == 6 and pin.isdigit(), "PIN must be 6 digits - meets Supabase's password minimum"
+    print("  generated PIN is 6 digits: {}".format(pin))
+    print()
+
+
+if __name__ == "__main__":
+    check_tiling()
+    check_dedupe_chaining()
+    check_volume_number_guard()
+    check_catalogue_match_disambiguation()
+    check_repetition_guard()
+    check_salvage_keeps_spine_only_entries()
+    check_genre_classify()
+    check_manual_ingestion()
+    check_worker_routing()
+    check_create_testers_parsing()
+    check_pipeline()
+    print()
+    print("All checks passed.")

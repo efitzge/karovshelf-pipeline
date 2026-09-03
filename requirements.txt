@@ -1,0 +1,5 @@
+anthropic>=0.116.0
+requests>=2.32
+pillow>=11.0
+# Optional, only needed for video input:
+# opencv-python>=4.10

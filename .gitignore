@@ -1,0 +1,7 @@
+out/
+samples/*
+!samples/.gitkeep
+__pycache__/
+*.pyc
+.env
+karovshelf-israel-artwork.zip
