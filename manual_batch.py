@@ -183,12 +183,14 @@ def cmd_publish(args):
 
     for record in records:
         book_id = record.book_id
+        authors = record.authors or ([record.raw_author] if record.raw_author else [])
         if not book_id:
             book_id = client.insert_placeholder_book(
-                owner_id,
-                record.display_title,
-                record.authors or ([record.raw_author] if record.raw_author else []),
+                owner_id, record.display_title, authors,
                 spine_text=record.spine_text)
+        else:
+            client.supersede_owner_placeholder(
+                owner_id, book_id, record.display_title, authors)
         client.upsert_library_item(owner_id, book_id, record.spine_text, record.legibility,
                                    scan_batch_id=batch_db_id,
                                    source_photo_path=resolve_source_photo(
@@ -254,12 +256,14 @@ def cmd_finish(args):
     client.claim(args.batch_id)
     for record in records:
         book_id = record.book_id
+        authors = record.authors or ([record.raw_author] if record.raw_author else [])
         if not book_id:
             book_id = client.insert_placeholder_book(
-                batch.owner_id,
-                record.display_title,
-                record.authors or ([record.raw_author] if record.raw_author else []),
+                batch.owner_id, record.display_title, authors,
                 spine_text=record.spine_text)
+        else:
+            client.supersede_owner_placeholder(
+                batch.owner_id, book_id, record.display_title, authors)
         client.upsert_library_item(batch.owner_id, book_id, record.spine_text, record.legibility,
                                    scan_batch_id=args.batch_id,
                                    source_photo_path=resolve_source_photo(

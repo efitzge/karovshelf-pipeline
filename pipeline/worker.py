@@ -370,6 +370,40 @@ class SupabaseWorkerClient:
         response.raise_for_status()
         return response.json()[0]["id"]
 
+    def supersede_owner_placeholder(self, owner_id, book_id, title, authors):
+        """Delete this owner's existing placeholder for (title, authors) now
+        that a real catalogue match exists for the same book.
+
+        Mirrors find_owner_placeholder_book/insert_placeholder_book's own
+        reuse logic, but for the other direction: a book that missed the
+        catalogue on one scan (became a placeholder) and then matched on a
+        later rescan of the same shelf used to just add a second
+        library_items row instead of replacing the first, because only the
+        placeholder-to-placeholder path checked for an existing owner copy -
+        the placeholder-to-*matched* path had no such check at all. Found
+        2026-09-03 as five real duplicate pairs (Contract Law and Theory,
+        The Koren Tehillim, etc. - see PROJECT_SUMMARY.md #10) after Elliot
+        spotted repeats in the live library; cleaned up by hand in Supabase,
+        this closes the code-level gap that produced them.
+
+        No-op if this owner has no matching placeholder - the normal case.
+        """
+        old_book_id = self.find_owner_placeholder_book(owner_id, title, authors)
+        if not old_book_id or old_book_id == book_id:
+            return
+        response = self.session.delete(
+            self._rest("library_items"),
+            params={"owner_id": "eq." + owner_id, "book_id": "eq." + old_book_id},
+            timeout=config.HTTP_TIMEOUT)
+        response.raise_for_status()
+        # Placeholders are minted one-per-scan and never shared with another
+        # owner (see insert_placeholder_book's docstring) - safe to delete
+        # outright now that its one referencing library_item is gone.
+        response = self.session.delete(
+            self._rest("books"), params={"id": "eq." + old_book_id},
+            timeout=config.HTTP_TIMEOUT)
+        response.raise_for_status()
+
     def upsert_library_item(self, owner_id, book_id, scan_spine_text, scan_legibility,
                             scan_batch_id=None, source_photo_path=None):
         """Create (or update, if this owner+book already exists) a draft.
@@ -470,13 +504,15 @@ def process_batch(client, batch, book_cache=None, language="any", progress=None,
         # private placeholder row instead of polluting the shared cache.
         for record in records:
             book_id = record.book_id
+            authors = record.authors or ([record.raw_author]
+                                          if record.raw_author else [])
             if not book_id:
                 book_id = client.insert_placeholder_book(
-                    batch.owner_id,
-                    record.display_title,
-                    record.authors or ([record.raw_author]
-                                       if record.raw_author else []),
+                    batch.owner_id, record.display_title, authors,
                     spine_text=record.spine_text)
+            else:
+                client.supersede_owner_placeholder(
+                    batch.owner_id, book_id, record.display_title, authors)
             client.upsert_library_item(
                 batch.owner_id, book_id,
                 record.spine_text, record.legibility,
