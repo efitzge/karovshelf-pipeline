@@ -176,6 +176,55 @@ def check_series_detection():
     print()
 
 
+def check_series_prefix_clustering():
+    """cluster_series_by_prefix() catches a real multi-book set with no
+    "Vol. N" marker at all - just a shared series-name prefix before each
+    volume's own subtitle. Found for real 2026-09-03: 14 "A Daily Dose of
+    Torah: ..." books in production, only 2 of which detect_series() alone
+    could tag (the two that happened to also say "Vol. N").
+    """
+    print("== series grouping by shared title prefix ==")
+
+    def book(id_, title, series_title=None, owner="owner-1"):
+        return {"id": id_, "title": title, "series_title": series_title, "owner_id": owner}
+
+    daily_dose = [
+        book("b1", "A Daily Dose of Torah, Vol. 11: Weeks of Matos-Vaeschanan", "A Daily Dose of Torah"),
+        book("b2", "A daily dose of Torah: Daily study for the weeks of Acharei-Bechukosai. 2007"),
+        book("b3", "A Daily Dose of Torah: Shemos-Beshalach"),
+    ]
+    updates = dict(enrich.cluster_series_by_prefix(daily_dose, min_group_size=3))
+    assert "b1" not in updates, "already-correct canonical title shouldn't get rewritten"
+    assert updates["b2"] == "A Daily Dose of Torah"
+    assert updates["b3"] == "A Daily Dose of Torah"
+    print("  14-volume-style set, only 1 pre-tagged -> the other 2 inherit its title")
+
+    # Too few members - must NOT group (same MIN_GROUP_SIZE convention as
+    # the display grouping this feeds).
+    pair = [book("c1", "Covenant & Conversation: Genesis"),
+            book("c2", "Covenant & Conversation: Exodus")]
+    assert enrich.cluster_series_by_prefix(pair, min_group_size=3) == []
+    print("  only 2 shared-prefix books -> left alone")
+
+    # Different owners with the same prefix are NOT one set.
+    cross_owner = [
+        book("d1", "The Hirsch Chumash: Bereishis", owner="alice"),
+        book("d2", "The Hirsch Chumash: Vayikra", owner="alice"),
+        book("d3", "The Hirsch Chumash: Bemidbar", owner="bob"),
+    ]
+    assert enrich.cluster_series_by_prefix(cross_owner, min_group_size=3) == []
+    print("  same prefix, different owners -> not grouped together")
+
+    # A short shared prefix before the comma/colon must never qualify, even
+    # with 3+ members - "I" alone is not a meaningful series signal.
+    assert enrich._title_prefix("I: Book One") is None
+    assert enrich._title_prefix("A Daily Dose of Torah: Weeks of X") == "A Daily Dose of Torah"
+    short_prefix = [book("e1", "I: Book One"), book("e2", "I: Book Two"), book("e3", "I: Book Three")]
+    assert enrich.cluster_series_by_prefix(short_prefix, min_group_size=3) == []
+    print("  short shared prefix ('I') -> not grouped even with 3+ members")
+    print()
+
+
 def check_catalogue_match_disambiguation():
     """Guard against binding a short/generic title to a completely unrelated
     real book, when there's no author on the scan to catch it.
@@ -580,6 +629,7 @@ if __name__ == "__main__":
     check_dedupe_chaining()
     check_volume_number_guard()
     check_series_detection()
+    check_series_prefix_clustering()
     check_catalogue_match_disambiguation()
     check_repetition_guard()
     check_salvage_keeps_spine_only_entries()

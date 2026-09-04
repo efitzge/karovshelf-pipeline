@@ -421,6 +421,70 @@ def detect_series(title):
     return (base, num) if base else None
 
 
+_PREFIX_SPLIT = re.compile(r"[,:]")
+
+
+def _title_prefix(title, min_length=12):
+    """Text before the title's first comma or colon, or None if that's
+    shorter than `min_length` - too short to be a meaningful series-name
+    signal on its own (a bare "The" matching half the library isn't one).
+    """
+    if not title:
+        return None
+    part = _PREFIX_SPLIT.split(title, maxsplit=1)[0].strip()
+    return part if len(part) >= min_length else None
+
+
+def cluster_series_by_prefix(books, min_group_size=3, min_prefix_length=12):
+    """Existing-library backfill pass, complementary to detect_series():
+    catches a real multi-book set whose volumes carry no "Vol. N" marker at
+    all, just a shared series-name prefix before the per-volume subtitle -
+    "A Daily Dose of Torah: Daily study for the weeks of X-Y" (14 real
+    volumes in production, none individually detectable by detect_series())
+    is the case that prompted this, at Elliot's request 2026-09-03.
+
+    `books`: an iterable of dicts with `id`, `title`, `series_title`,
+    `owner_id`. Returns a list of (book_id, canonical_series_title) pairs
+    to write - only for books whose series_title needs to change, so a
+    re-run is a no-op once applied.
+
+    Clustering is scoped per-owner (the same prefix from two different
+    owners' shelves is not one set), and requires 3+ real members sharing
+    the prefix - a lone match or a pair is left alone, same MIN_GROUP_SIZE
+    convention as the display grouping this feeds
+    (karovshelf-web/src/lib/seriesGrouping.ts). Purely additive: a member
+    that already has a series_title from detect_series() (an explicit
+    "Vol. N") keeps contributing its real volume number - this only fills
+    in series_title for its prefix-matched siblings, using the majority
+    already-assigned title as canonical when one exists, so "A Daily Dose
+    of Torah, Vol. 11" and its 12 unnumbered siblings end up in the exact
+    same display group rather than two separate ones.
+    """
+    from collections import Counter, defaultdict
+
+    by_key = defaultdict(list)
+    for book in books:
+        prefix = _title_prefix(book["title"], min_prefix_length)
+        if not prefix:
+            continue
+        by_key[(book["owner_id"], prefix.lower())].append(book)
+
+    updates = []
+    for members in by_key.values():
+        if len(members) < min_group_size:
+            continue
+        existing_titles = [m["series_title"] for m in members if m.get("series_title")]
+        if existing_titles:
+            canonical = Counter(existing_titles).most_common(1)[0][0]
+        else:
+            prefixes = [_title_prefix(m["title"], min_prefix_length) for m in members]
+            canonical = Counter(prefixes).most_common(1)[0][0]
+        for member in members:
+            if member.get("series_title") != canonical:
+                updates.append((member["id"], canonical))
+    return updates
+
+
 def dedupe(books):
     """Collapse the same physical book seen in several overlapping tiles.
 
