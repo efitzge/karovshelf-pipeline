@@ -469,6 +469,38 @@ def check_genre_classify():
     print()
 
 
+def check_categorize_title_fallback():
+    """categorize()'s last-resort title/spine keyword fallback, added
+    2026-09-04 so placeholders (no catalogue subjects, so classify_genre()
+    never runs) aren't stuck "Uncategorised" forever just because they never
+    matched anything. Must stay narrow: only phrases naming the book's own
+    form, not topic words a novel and a history book could both use."""
+    print("== categorize() title/spine fallback (subject-less books) ==")
+    from pipeline.enrich import categorize
+
+    assert categorize("Klara and the Sun: A Novel", ["Kazuo Ishiguro"], None) == "Fiction", (
+        "'a novel' in the title is a strong fiction signal with no subjects to fall back on"
+    )
+    assert categorize("Educated: A Memoir", ["Tara Westover"], None) == "Non-fiction", (
+        "'a memoir' in the title is a strong non-fiction signal"
+    )
+    assert categorize("A Brief History of Time", ["Stephen Hawking"], None) is None, (
+        "'history' alone must NOT trigger the fallback - it's a topic word, not a form marker, "
+        "and this particular book is Science, not History"
+    )
+    assert categorize("Untitled Reading", [], None) is None, (
+        "no signal at all must still stay None - conservative by design"
+    )
+
+    # A real catalogue-derived genre still wins outright; the title fallback
+    # never even gets consulted when subjects already answered the question.
+    assert categorize("Some Novel", [], "Biography & History", subjects=["memoir"]) == "Non-fiction", (
+        "genre from real subjects must take priority over any title wording"
+    )
+    print("  'a novel'/'a memoir' style phrasing -> categorized; bare topic words -> left None")
+    print()
+
+
 def check_worker_routing():
     """The auto-vs-escalate decision must catch each known bad signal alone,
     and must not escalate a genuinely clean batch. This is a product decision
@@ -634,6 +666,7 @@ if __name__ == "__main__":
     check_repetition_guard()
     check_salvage_keeps_spine_only_entries()
     check_genre_classify()
+    check_categorize_title_fallback()
     check_manual_ingestion()
     check_worker_routing()
     check_create_testers_parsing()

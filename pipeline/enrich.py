@@ -228,6 +228,26 @@ FICTION_GENRES = set(GENRES[:6])
 NONFICTION_GENRES = set(GENRES[6:])
 
 
+# Tier 4 (categorize() only, last resort): title/spine phrasing that names
+# its own form directly. A placeholder (unmatched book) has no catalogue
+# `subjects` at all, so classify_genre() never gets a chance to run - it was
+# landing in "Uncategorised" forever regardless of how obviously fictional
+# the book was (found 2026-09-04, since placeholders are exactly the books
+# most likely to have no cover either, so they're the ones that most need a
+# category to pick a fallback cover tile). Deliberately narrow compared to
+# FICTION_MARKERS/TOPICAL_GENRES above: those are tuned for noisy but
+# reliable Library-of-Congress subject strings, where "history" or "war"
+# really does mean the book is about that. In a TITLE the same word is as
+# likely to belong to a novel as a history book, so only phrases that name
+# the book's own form (not just a topic it touches) are safe here.
+TITLE_FICTION_MARKERS = ("a novel", "a novella")
+TITLE_NONFICTION_MARKERS = (
+    "a memoir", "an autobiography", "a biography of", "a history of",
+    "a guide to", "field guide", "the true story", "an introduction to",
+    "encyclopedia of", "dictionary of", "cookbook", "for dummies",
+)
+
+
 def categorize(title, authors, genre, subjects=None, spine_text=None):
     """Fiction / Non-fiction / Judaica, or None when genuinely unsure.
 
@@ -253,6 +273,11 @@ def categorize(title, authors, genre, subjects=None, spine_text=None):
         return "Fiction"
     if genre in NONFICTION_GENRES:
         return "Non-fiction"
+
+    if any(marker in haystack for marker in TITLE_NONFICTION_MARKERS):
+        return "Non-fiction"
+    if any(marker in haystack for marker in TITLE_FICTION_MARKERS):
+        return "Fiction"
     return None
 
 
