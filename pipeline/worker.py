@@ -18,7 +18,6 @@ import mimetypes
 import os
 import re
 import tempfile
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -351,16 +350,31 @@ class SupabaseWorkerClient:
         2026-09-03 when a real batch's Maggid/Artscroll Judaica placeholders
         came back uncategorised (`category IS NULL`) purely because this
         parameter didn't exist yet.
+
+        `lookup_key` is deterministic (owner_id + normalised title/authors),
+        not a random uuid, and the write uses on_conflict/merge-duplicates -
+        the same retry-safety pattern as BookCache.store(). This session's
+        own HTTP retry config retries POST on a transient 429/500/502/503/
+        504, and a random lookup_key made that retry unsafe: if the first
+        attempt's insert actually succeeded server-side but the response was
+        lost, the retry minted a second, genuinely duplicate placeholder
+        with a different random key - found 2026-09-04 as a real duplicate
+        ("My First Book about Physics", two rows from one input record; the
+        exact trigger wasn't pinned down, but this gap was real regardless).
+        This also gives find_owner_placeholder_book()'s own reuse check a
+        database-level backstop instead of being the only guard.
         """
         existing_id = self.find_owner_placeholder_book(owner_id, title, authors)
         if existing_id:
             return existing_id
 
         series = enrich.detect_series(title)
+        lookup_key = "placeholder:" + owner_id + ":" + make_lookup_key(
+            title, ", ".join(authors or []))
         payload = {
             "title": title,
             "authors": authors or [],
-            "lookup_key": "placeholder:" + str(uuid.uuid4()),
+            "lookup_key": lookup_key,
             "is_placeholder": True,
             "category": enrich.categorize(title, authors, None, spine_text=spine_text),
             "series_title": series[0] if series else None,
@@ -368,7 +382,8 @@ class SupabaseWorkerClient:
         }
         response = self.session.post(
             self._rest("books"), json=payload,
-            headers={"Prefer": "return=representation"},
+            params={"on_conflict": "lookup_key"},
+            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
             timeout=config.HTTP_TIMEOUT)
         response.raise_for_status()
         return response.json()[0]["id"]
