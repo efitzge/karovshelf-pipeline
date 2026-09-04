@@ -185,6 +185,25 @@ Three levers, in order of how much they help:
   report - so a rescan can be targeted rather than the collection silently
   missing books. See `check_repetition_guard()` in `selftest.py`.
 
+- **Dedupe only covers duplicates within one scan, plus rescans of an
+  already-*unmatched* book - not a placeholder that later gets a real
+  catalogue match.** Found 2026-09-03: a book that missed the catalogue on
+  one scan (became a private placeholder) and was later rescanned and
+  correctly matched used to create a *second* `library_items` row instead
+  of replacing the first, because only the placeholder-to-placeholder
+  rescan path checked for an existing owner copy - the placeholder-to-
+  matched path had no check at all. Produced 5 real duplicates in
+  production (e.g. "The Koren Tehillim" appearing twice - once as an
+  unmatched placeholder, once correctly matched) before anyone noticed.
+  Fixed with `SupabaseWorkerClient.supersede_owner_placeholder()`
+  (`pipeline/worker.py`), wired into every write path that can produce a
+  matched `book_id`. This is a live-HTTP-calling method with no unit test
+  (same convention as `insert_placeholder_book`/`find_owner_placeholder_book`)
+  and hasn't yet been exercised against a real production rescan - **worth
+  watching the next time an owner's already-placeholder'd book gets
+  rescanned and matches**, to confirm it actually supersedes instead of
+  duplicating. See `PROJECT_SUMMARY.md` §10 for the full incident.
+
 ## The shared book cache
 
 The binding constraint on this product is **not** model accuracy - it is
