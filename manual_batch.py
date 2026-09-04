@@ -185,8 +185,12 @@ def cmd_publish(args):
         book_id = record.book_id
         authors = record.authors or ([record.raw_author] if record.raw_author else [])
         if not book_id:
+            # raw_title, not display_title - a rejected-for-caching match can
+            # still have overwritten record.title with a generic candidate
+            # title (matched=True sets it before is_cacheable() runs). See
+            # pipeline/worker.py's process_batch() for the full incident.
             book_id = client.insert_placeholder_book(
-                owner_id, record.display_title, authors,
+                owner_id, record.raw_title, authors,
                 spine_text=record.spine_text)
         else:
             client.supersede_owner_placeholder(
@@ -258,8 +262,10 @@ def cmd_finish(args):
         book_id = record.book_id
         authors = record.authors or ([record.raw_author] if record.raw_author else [])
         if not book_id:
+            # raw_title, not display_title - see process_batch() in
+            # pipeline/worker.py for the full incident this guards against.
             book_id = client.insert_placeholder_book(
-                batch.owner_id, record.display_title, authors,
+                batch.owner_id, record.raw_title, authors,
                 spine_text=record.spine_text)
         else:
             client.supersede_owner_placeholder(

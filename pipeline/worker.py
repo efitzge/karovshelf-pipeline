@@ -510,8 +510,20 @@ def process_batch(client, batch, book_cache=None, language="any", progress=None,
             authors = record.authors or ([record.raw_author]
                                           if record.raw_author else [])
             if not book_id:
+                # record.title may already carry a catalogue candidate's title
+                # even here - matched=True sets it unconditionally, before
+                # is_cacheable() gets a say (see pipeline/cache.py). Found
+                # 2026-09-04: "Greatest Battles for Boys: The Vietnam War"
+                # matched a real but subtitle-less candidate ("Greatest
+                # Battles for Boys"), which failed the cache bar and fell
+                # here - but display_title would have used that generic
+                # title anyway, silently losing the one thing that
+                # distinguished it from an already-owned, unrelated book
+                # ("...The Ancient Wars"). raw_title is always what was
+                # actually read off the spine - the only safe choice for a
+                # private, untrusted placeholder.
                 book_id = client.insert_placeholder_book(
-                    batch.owner_id, record.display_title, authors,
+                    batch.owner_id, record.raw_title, authors,
                     spine_text=record.spine_text)
             else:
                 client.supersede_owner_placeholder(
