@@ -329,7 +329,7 @@ class SupabaseWorkerClient:
                 return row.get("book_id")
         return None
 
-    def insert_placeholder_book(self, owner_id, title, authors, spine_text=None):
+    def insert_placeholder_book(self, owner_id, title, authors, spine_text=None, genre=None):
         """A books row that exists only so a library_item has an FK target.
 
         Never fuzzy-searchable by another user - see the is_placeholder
@@ -363,6 +363,17 @@ class SupabaseWorkerClient:
         exact trigger wasn't pinned down, but this gap was real regardless).
         This also gives find_owner_placeholder_book()'s own reuse check a
         database-level backstop instead of being the only guard.
+
+        `genre`, when given, should be `record.genre` (which already folds
+        in the batched end-of-scan LLM classification pass, not just the
+        catalogue-subjects keyword classifier) - a placeholder has no
+        catalogue subjects at all, so without this it always fell back to
+        `categorize()`'s title/spine keyword tier alone. Every caller runs
+        `genre_classify.classify_genres_batch()` on its records before this
+        is called, so `record.genre` is always the best guess available by
+        the time we get here. Found 2026-09-04: `category` was being
+        computed with a hardcoded `None` genre, silently discarding an LLM
+        classification the pipeline had already paid for.
         """
         existing_id = self.find_owner_placeholder_book(owner_id, title, authors)
         if existing_id:
@@ -376,7 +387,8 @@ class SupabaseWorkerClient:
             "authors": authors or [],
             "lookup_key": lookup_key,
             "is_placeholder": True,
-            "category": enrich.categorize(title, authors, None, spine_text=spine_text),
+            "genre": genre,
+            "category": enrich.categorize(title, authors, genre, spine_text=spine_text),
             "series_title": series[0] if series else None,
             "series_volume": series[1] if series else None,
         }
@@ -539,7 +551,7 @@ def process_batch(client, batch, book_cache=None, language="any", progress=None,
                 # private, untrusted placeholder.
                 book_id = client.insert_placeholder_book(
                     batch.owner_id, record.raw_title, authors,
-                    spine_text=record.spine_text)
+                    spine_text=record.spine_text, genre=record.genre)
             else:
                 client.supersede_owner_placeholder(
                     batch.owner_id, book_id, record.display_title, authors)

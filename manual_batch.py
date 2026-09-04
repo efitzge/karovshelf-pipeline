@@ -191,7 +191,7 @@ def cmd_publish(args):
             # pipeline/worker.py's process_batch() for the full incident.
             book_id = client.insert_placeholder_book(
                 owner_id, record.raw_title, authors,
-                spine_text=record.spine_text)
+                spine_text=record.spine_text, genre=record.genre)
         else:
             client.supersede_owner_placeholder(
                 owner_id, book_id, record.display_title, authors)
@@ -266,7 +266,7 @@ def cmd_finish(args):
             # pipeline/worker.py for the full incident this guards against.
             book_id = client.insert_placeholder_book(
                 batch.owner_id, record.raw_title, authors,
-                spine_text=record.spine_text)
+                spine_text=record.spine_text, genre=record.genre)
         else:
             client.supersede_owner_placeholder(
                 batch.owner_id, book_id, record.display_title, authors)
