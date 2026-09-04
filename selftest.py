@@ -139,6 +139,43 @@ def check_volume_number_guard():
     print()
 
 
+def check_series_detection():
+    """detect_series() powers the web app's "condense N volumes into one
+    card" display grouping (My Library / Search) - it must find the same
+    base title/volume number the volume-number dedupe guard above already
+    protects, plus the "Vol. N: Subtitle" shape that guard doesn't need to
+    handle (a subtitle after the number never blocks a dedupe merge, since
+    dedupe compares whole titles, but grouping needs the bare number).
+    """
+    print("== series detection (for display grouping) ==")
+
+    assert enrich.detect_series("The Sandman, Vol. 7") == ("The Sandman", 7)
+    assert enrich.detect_series("The Sandman Vol. 10: The Wake") == ("The Sandman", 10)
+    print("  'The Sandman, Vol. 7' / 'Vol. 10: The Wake' -> base + volume number")
+
+    assert enrich.detect_series("Kitzur Shulchan Aruch, Vol. II") == ("Kitzur Shulchan Aruch", 2)
+    print("  'Vol.' + bare roman numeral -> detected")
+
+    assert enrich.detect_series("The Goldfinch") is None
+    assert enrich.detect_series("A Gentleman in Moscow") is None
+    print("  ordinary titles with no volume marker -> None")
+
+    # Real false positives found the first time this ran against the live
+    # library, 2026-09-03 - all from the bare leading/trailing-numeral
+    # fallback this function deliberately does NOT use (unlike the dedupe
+    # guard above, which is safe to use it because it only ever blocks a
+    # merge, never actively groups). Requiring an explicit "Vol."/"Volume"/
+    # "Part" keyword avoids every one of these.
+    assert enrich.detect_series("I Believe") is None
+    assert enrich.detect_series("I asked for wonder") is None
+    assert enrich.detect_series("Fahrenheit 451") is None
+    assert enrich.detect_series("60 Days Away") is None
+    assert enrich.detect_series("I Kings") is None
+    assert enrich.detect_series("The ABCs of the UCC, Articles 3 and 4") is None
+    print("  real false-positive cases from the 2026-09-03 backfill -> all None")
+    print()
+
+
 def check_catalogue_match_disambiguation():
     """Guard against binding a short/generic title to a completely unrelated
     real book, when there's no author on the scan to catch it.
@@ -542,6 +579,7 @@ if __name__ == "__main__":
     check_tiling()
     check_dedupe_chaining()
     check_volume_number_guard()
+    check_series_detection()
     check_catalogue_match_disambiguation()
     check_repetition_guard()
     check_salvage_keeps_spine_only_entries()

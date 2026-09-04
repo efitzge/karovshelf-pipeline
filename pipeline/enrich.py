@@ -379,6 +379,48 @@ def _trailing_volume_marker(title):
     return _volume_marker_token(title.strip().split()[-1])
 
 
+_VOLUME_WORD_PATTERN = re.compile(
+    r"^(?P<base>.+?)[,:]?\s+(?:vol(?:ume)?|part|pt)\.?\s*(?P<num>[0-9]+|[ivxlcdm]+)\b",
+    re.IGNORECASE,
+)
+
+
+def detect_series(title):
+    """(base_title, volume_number) for an obviously-numbered volume in a
+    multi-part set, or None if the title doesn't carry one.
+
+    Built for display grouping ("A Daily Dose of Torah, Vol. 1-13" as one
+    collapsed card instead of 13 separate entries - see PROJECT_SUMMARY.md
+    #10), not for matching or dedupe - a false positive here just fails to
+    group two books together, it can never wrongly merge them the way a
+    dedupe false positive would (that guard, in dedupe() below, is separate
+    and deliberately stricter).
+
+    Deliberately requires an explicit "Vol./Volume/Part N" marker - it does
+    NOT fall back to _leading_volume_marker/_trailing_volume_marker's bare-
+    numeral check the way the dedupe guard does. That bare check is safe
+    there because it only ever *blocks* an already-near-identical-title
+    merge; reused here as a fallback it produced real false positives on
+    the actual library the first time this ran - "I Believe" and "I asked
+    for wonder" read as "Vol. 1" (bare leading "I"), "Fahrenheit 451" as
+    "Vol. 451" and "60 Days Away" as "Vol. 60" (bare trailing numeral), "The
+    ABCs of the UCC, Articles 3 and 4" as "Vol. 4". The cost of dropping it
+    is missing a few keyword-less cases like "I Kings"/"II Kings" - an
+    acceptable trade for not mistagging ordinary titles as volume 1 of a
+    series that doesn't exist.
+    """
+    if not title:
+        return None
+    m = _VOLUME_WORD_PATTERN.match(title.strip())
+    if not m:
+        return None
+    num = _volume_marker_token(m.group("num"))
+    if num is None:
+        return None
+    base = m.group("base").strip().rstrip(",:")
+    return (base, num) if base else None
+
+
 def dedupe(books):
     """Collapse the same physical book seen in several overlapping tiles.
 

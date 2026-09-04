@@ -20,7 +20,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from . import config
-from .enrich import categorize
+from .enrich import categorize, detect_series
 
 # A cached row has to beat this blended title/author score to be served instead
 # of a fresh external lookup. Deliberately stricter than the trigram operator's
@@ -161,6 +161,7 @@ class BookCache:
         if not is_cacheable(record):
             return
 
+        series = detect_series(record.title or record.raw_title)
         payload = {
             "lookup_key": make_lookup_key(record.raw_title, record.raw_author),
             "title": record.title or record.raw_title,
@@ -177,6 +178,8 @@ class BookCache:
             "cover_url": record.cover_url,
             "match_source": record.source,
             "match_score": round(float(record.match_score or 0), 3),
+            "series_title": series[0] if series else None,
+            "series_volume": series[1] if series else None,
         }
         if record.isbn and len(record.isbn) == 13:
             payload["isbn13"] = record.isbn

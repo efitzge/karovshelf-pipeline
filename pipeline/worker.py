@@ -356,12 +356,15 @@ class SupabaseWorkerClient:
         if existing_id:
             return existing_id
 
+        series = enrich.detect_series(title)
         payload = {
             "title": title,
             "authors": authors or [],
             "lookup_key": "placeholder:" + str(uuid.uuid4()),
             "is_placeholder": True,
             "category": enrich.categorize(title, authors, None, spine_text=spine_text),
+            "series_title": series[0] if series else None,
+            "series_volume": series[1] if series else None,
         }
         response = self.session.post(
             self._rest("books"), json=payload,
