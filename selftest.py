@@ -225,6 +225,36 @@ def check_series_prefix_clustering():
     print()
 
 
+def check_series_from_catalogue_subjects():
+    """catalogue_series_title (_series_from_subjects()) covers the one real
+    gap neither detect_series() nor cluster_series_by_prefix() can: a series
+    like The Expanse ("Leviathan Wakes", "Caliban's War", "Abaddon's Gate", ...)
+    whose volumes share no common title wording at all - Open Library tags
+    some editions' subjects with "series:<name>", the only real signal
+    available for this case. Added 2026-09-09."""
+    print("== series name from catalogue subjects (differently-titled series) ==")
+
+    assert enrich._series_from_subjects(
+        ["Space warfare", "Fiction", "series:The Expanse"]
+    ) == "The Expanse"
+    print("  'series:The Expanse' subject tag -> 'The Expanse'")
+
+    assert enrich._series_from_subjects(["Fiction", "American literature"]) is None
+    assert enrich._series_from_subjects([]) is None
+    assert enrich._series_from_subjects(None) is None
+    print("  no series-tagged subject -> None (most books, most editions)")
+
+    # _clean_subjects() (the genre-classifier's subjects list) must not keep
+    # the raw "series:X" tag around - it reads like noise to a genre
+    # classifier, and _series_from_subjects() is the one place that cares
+    # about it, working from the raw list before cleaning.
+    cleaned = enrich._clean_subjects(["Fiction", "series:The Expanse", "Space warfare"])
+    assert "series:The Expanse" not in cleaned
+    assert cleaned == ["Fiction", "Space warfare"]
+    print("  'series:X' tag stripped from the cleaned genre-subjects list")
+    print()
+
+
 def check_catalogue_match_disambiguation():
     """Guard against binding a short/generic title to a completely unrelated
     real book, when there's no author on the scan to catch it.
@@ -662,6 +692,7 @@ if __name__ == "__main__":
     check_volume_number_guard()
     check_series_detection()
     check_series_prefix_clustering()
+    check_series_from_catalogue_subjects()
     check_catalogue_match_disambiguation()
     check_repetition_guard()
     check_salvage_keeps_spine_only_entries()

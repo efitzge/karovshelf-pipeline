@@ -162,6 +162,15 @@ class BookCache:
             return
 
         series = detect_series(record.title or record.raw_title)
+        # detect_series() needs an explicit "Vol. N" in the title and finds
+        # nothing for a series like The Expanse, whose volumes don't share
+        # any title wording at all - catalogue_series_title (Open Library's
+        # own "series:X" subject tag, when present) is the fallback for
+        # exactly that case. No volume number comes with it, so ordering
+        # within the group falls back to alphabetical (see
+        # karovshelf-web/src/lib/seriesGrouping.ts).
+        series_title = series[0] if series else record.catalogue_series_title
+        series_volume = series[1] if series else None
         payload = {
             "lookup_key": make_lookup_key(record.raw_title, record.raw_author),
             "title": record.title or record.raw_title,
@@ -178,8 +187,8 @@ class BookCache:
             "cover_url": record.cover_url,
             "match_source": record.source,
             "match_score": round(float(record.match_score or 0), 3),
-            "series_title": series[0] if series else None,
-            "series_volume": series[1] if series else None,
+            "series_title": series_title,
+            "series_volume": series_volume,
         }
         if record.isbn and len(record.isbn) == 13:
             payload["isbn13"] = record.isbn

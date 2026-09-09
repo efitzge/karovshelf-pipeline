@@ -315,6 +315,17 @@ class CatalogueRecord:
     subjects: list = field(default_factory=list)
     lookup_errors: list = field(default_factory=list)
 
+    # A series name straight from the catalogue's own "series:X"-tagged
+    # subject (Open Library only - see _series_from_subjects), for series
+    # whose volumes don't share a common title/prefix at all (The Expanse:
+    # "Leviathan Wakes", "Caliban's War", ... - detect_series() needs an
+    # explicit "Vol. N" and cluster_series_by_prefix() needs a shared
+    # prefix, so differently-titled series like this were a known,
+    # documented gap neither one covers). No volume number comes with it -
+    # only used as a fallback series_title when detect_series() finds
+    # nothing (see cache.py's store()).
+    catalogue_series_title: str | None = None
+
     # Set by the optional batched end-of-scan LLM classification pass
     # (genre_classify.classify_genres_batch), for records whose catalogue
     # subjects gave classify_genre() nothing to work with. None otherwise.
@@ -603,6 +614,8 @@ def _clean_subjects(subjects):
     out = []
     for subject in subjects or []:
         low = subject.lower()
+        if low.startswith("series:"):
+            continue
         if any(bad in low for bad in skip):
             continue
         if len(subject) > 40 or subject.isdigit():
@@ -612,6 +625,20 @@ def _clean_subjects(subjects):
         if len(out) >= 6:
             break
     return out
+
+
+def _series_from_subjects(subjects):
+    """Open Library tags some editions' subjects with "series:<name>" -
+    e.g. "series:The Expanse". The only real signal this pipeline has for a
+    series whose volumes share no common title wording at all (see
+    CatalogueRecord.catalogue_series_title). Takes the first one found;
+    real books rarely carry more than one."""
+    for subject in subjects or []:
+        if subject.lower().startswith("series:"):
+            name = subject[len("series:"):].strip()
+            if name:
+                return name
+    return None
 
 
 OL_FIELDS = "title,author_name,first_publish_year,isbn,cover_i,subject"
@@ -694,6 +721,7 @@ def _try_openlibrary(session, record, language=None):
         record.cover_url = "https://covers.openlibrary.org/b/id/{}-M.jpg".format(
             best["cover_i"])
     record.subjects = _clean_subjects(best.get("subject"))
+    record.catalogue_series_title = _series_from_subjects(best.get("subject"))
     return True
 
 
