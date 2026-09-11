@@ -102,16 +102,25 @@ def _parse_and_enrich(reply_path, batch_id, language, no_cache):
     if book_cache is not None and not book_cache.enabled:
         book_cache = None
 
-    lookup_errors = enrich.enrich(records, language=language, book_cache=book_cache)
+    # defer_store=True: classify_genres_batch() below sets record.llm_genre for
+    # records the keyword classifier couldn't place - storing to the shared
+    # cache before that runs would permanently cache "Uncategorised" for those
+    # books (found 2026-09-11). Store explicitly once classification is done,
+    # same fix as pipeline/worker.py's process_batch().
+    lookup_errors = enrich.enrich(records, language=language, book_cache=book_cache,
+                                  defer_store=True)
     matched = sum(1 for r in records if r.matched)
     needs_review = sum(1 for r in records if r.needs_review)
     print("{}/{} matched a catalogue record".format(matched, len(records)))
-    if book_cache is not None:
-        print(book_cache.summary())
     if lookup_errors:
         print("lookup errors:", lookup_errors)
 
     genre_classify.classify_genres_batch(records, progress=print)
+    if book_cache is not None:
+        for record in records:
+            if record.source != "cache":
+                book_cache.store(record)
+        print(book_cache.summary())
 
     stats = {
         "provider": "manual (admin-processed via chat UI)",

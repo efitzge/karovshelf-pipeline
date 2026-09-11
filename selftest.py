@@ -640,6 +640,51 @@ def check_manual_ingestion():
     print()
 
 
+def check_defer_store():
+    """defer_store=True must suppress BookCache.store() during enrich() -
+    added 2026-09-11 after finding worker.py's process_batch() and
+    manual_batch.py's _parse_and_enrich() both called book_cache.store() (via
+    _enrich_one, mid-match) *before* genre_classify.classify_genres_batch()
+    ran afterward. record.llm_genre is unset at store-time, so any book the
+    keyword classifier alone couldn't place got permanently cached as
+    "Uncategorised" - fixed by deferring the store and having each caller
+    store explicitly once classification has run.
+
+    Uses a real, live catalogue match (a well-known title, not mocked) with a
+    lightweight fake BookCache double - only lookup()/apply()/store() are
+    faked, matching this file's convention of never mocking the live HTTP
+    calls themselves.
+    """
+    print("== defer_store suppresses the cache write until the caller is ready ==")
+    from pipeline.enrich import CatalogueRecord
+
+    class FakeCache:
+        def __init__(self):
+            self.store_calls = 0
+
+        def lookup(self, record):
+            return None  # force a live match, never a cache hit
+
+        def apply(self, record, row):
+            raise AssertionError("lookup() always misses here, apply() should never run")
+
+        def store(self, record):
+            self.store_calls += 1
+
+    record = CatalogueRecord(raw_title="Dune", raw_author="Frank Herbert",
+                             spine_text="DUNE HERBERT", legibility="clear", seen_in=["t"])
+    fake = FakeCache()
+    enrich.enrich([record], book_cache=fake, defer_store=True)
+    assert record.matched, "a real, well-known title must still match live"
+    assert fake.store_calls == 0, "defer_store=True must suppress store() during matching"
+    print("  defer_store=True -> matched live against the real catalogue, store() not called yet")
+
+    fake.store(record)
+    assert fake.store_calls == 1
+    print("  caller's own store() call after classification runs normally")
+    print()
+
+
 def check_pipeline():
     print("== dedupe + catalogue matching ==")
     readings = [
@@ -732,6 +777,7 @@ if __name__ == "__main__":
     check_manual_ingestion()
     check_worker_routing()
     check_create_testers_parsing()
+    check_defer_store()
     check_pipeline()
     print()
     print("All checks passed.")

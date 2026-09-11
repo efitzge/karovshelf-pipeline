@@ -801,7 +801,7 @@ def _describe_http_error(exc):
     return "HTTP " + str(response.status_code)
 
 
-def _enrich_one(session, record, language=None, book_cache=None):
+def _enrich_one(session, record, language=None, book_cache=None, defer_store=False):
     """Try each catalogue in turn. Never let a lookup kill the run.
 
     The shared cache is consulted first. A hit costs one indexed query against
@@ -813,6 +813,17 @@ def _enrich_one(session, record, language=None, book_cache=None):
     matters more than it looks: if Google Books is rate-limiting, every book
     silently comes back unmatched and the whole scan looks like a model failure
     when it is really an outage in the enrichment layer.
+
+    `defer_store`, when true, skips the immediate `book_cache.store()` call on
+    a fresh match - for a caller that still needs to run the batched LLM
+    genre-classification pass (`genre_classify.classify_genres_batch()`)
+    afterward. Storing immediately here would write the shared cache row
+    before `record.llm_genre` is ever set, permanently caching "Uncategorised"
+    for any book the keyword classifier alone couldn't place - found
+    2026-09-11 auditing the code before a wider rollout. Such a caller must
+    call `book_cache.store(record)` itself once classification has run;
+    `store()` already no-ops for anything not matched/cacheable, so it's safe
+    to call unconditionally over every record afterward.
     """
     if book_cache is not None:
         cached = book_cache.lookup(record)
@@ -825,7 +836,7 @@ def _enrich_one(session, record, language=None, book_cache=None):
     for name, lookup in lookups:
         try:
             if lookup(session, record, language=language):
-                if book_cache is not None:
+                if book_cache is not None and not defer_store:
                     book_cache.store(record)
                 return record
         except requests.RequestException as exc:
@@ -838,23 +849,28 @@ def _enrich_one(session, record, language=None, book_cache=None):
     # fall back to searching everything before declaring no match.
     if language:
         try:
-            if _try_openlibrary(session, record, language=None) and book_cache:
+            if _try_openlibrary(session, record, language=None) and book_cache and not defer_store:
                 book_cache.store(record)
         except (requests.RequestException, ValueError, KeyError):
             pass
     return record
 
 
-def enrich(records, language="eng", max_workers=6, progress=None, book_cache=None):
+def enrich(records, language="eng", max_workers=6, progress=None, book_cache=None,
+           defer_store=False):
     """Look every deduped reading up in a real bibliographic catalogue.
 
     Returns a dict of per-source error counts so the caller can tell a genuine
     "this book is not in the catalogue" from "the catalogue was unreachable".
+
+    See `_enrich_one`'s docstring for `defer_store` - pass `True` when the
+    caller will run `genre_classify.classify_genres_batch()` on `records`
+    afterward and then store each one itself.
     """
     session = _session()
     done = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_enrich_one, session, record, language, book_cache)
+        futures = [pool.submit(_enrich_one, session, record, language, book_cache, defer_store)
                    for record in records]
         for future in as_completed(futures):
             future.result()

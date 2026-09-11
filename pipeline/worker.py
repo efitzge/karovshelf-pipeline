@@ -491,8 +491,18 @@ def process_batch(client, batch, book_cache=None, language="any", progress=None,
         result = extract.extract_books(tiles, provider, max_workers=workers, progress=log)
 
         records = enrich.dedupe(result.books)
-        lookup_errors = enrich.enrich(records, language=language, book_cache=book_cache)
+        # defer_store=True: classify_genres_batch() below sets record.llm_genre
+        # for records the keyword classifier couldn't place - storing to the
+        # shared cache before that runs would permanently cache "Uncategorised"
+        # for those books (found 2026-09-11). Store explicitly once
+        # classification is done instead.
+        lookup_errors = enrich.enrich(records, language=language, book_cache=book_cache,
+                                      defer_store=True)
         genre_classify.classify_genres_batch(records, progress=log)
+        if book_cache is not None:
+            for record in records:
+                if record.source != "cache":
+                    book_cache.store(record)
 
         matched = sum(1 for r in records if r.matched)
         needs_review = sum(1 for r in records if r.needs_review)
