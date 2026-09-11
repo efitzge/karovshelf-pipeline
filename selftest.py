@@ -561,6 +561,69 @@ def check_categorize_title_fallback():
     print()
 
 
+def check_owner_placeholder_index_pagination():
+    """_owner_placeholder_index() must actually walk every page rather than
+    silently stopping at PostgREST's default 1000-row page - found
+    2026-09-11: an owner whose library exceeded that could get a duplicate
+    placeholder on rescan because an existing one past the first page was
+    never seen. Uses a fake `session` object (no real network - this is
+    pure pagination control flow, not the HTTP call itself) that hands back
+    exactly 1000 rows on the first page and 1 more on the second, mirroring
+    the real page_size."""
+    print("== owner-placeholder index pagination ==")
+    from pipeline.worker import SupabaseWorkerClient
+
+    class FakeResponse:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._rows
+
+    class FakeSession:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params, timeout):
+            self.calls.append(params)
+            offset = params["offset"]
+            if offset == 0:
+                # A full first page of unrelated, non-placeholder items -
+                # exactly page_size rows, so the loop must ask for a second page.
+                rows = [
+                    {"book_id": "irrelevant-{}".format(i),
+                     "book": {"title": "Other Book {}".format(i), "authors": [], "is_placeholder": False}}
+                    for i in range(1000)
+                ]
+            elif offset == 1000:
+                # The actual target, sitting just past the first page.
+                rows = [{"book_id": "real-placeholder-id",
+                        "book": {"title": "Needle", "authors": ["Author"], "is_placeholder": True}}]
+            else:
+                rows = []
+            return FakeResponse(rows)
+
+    client = object.__new__(SupabaseWorkerClient)
+    client.url = "https://example.supabase.co"
+    client.key = "fake"
+    client.session = FakeSession()
+    client._placeholder_index_cache = {}
+
+    found = client.find_owner_placeholder_book("owner-1", "Needle", ["Author"])
+    assert found == "real-placeholder-id", "a placeholder on page 2 must still be found"
+    assert len(client.session.calls) == 2, "must have paginated to a second page, not stopped at the first"
+    print("  a placeholder past the first 1000-row page is still found (2 pages fetched)")
+
+    # Second call for the same owner must reuse the cached index, not refetch.
+    client.find_owner_placeholder_book("owner-1", "Needle", ["Author"])
+    assert len(client.session.calls) == 2, "a second lookup for the same owner must reuse the cached index"
+    print("  a repeat lookup for the same owner reuses the cached index instead of refetching")
+    print()
+
+
 def check_worker_routing():
     """The auto-vs-escalate decision must catch each known bad signal alone,
     and must not escalate a genuinely clean batch. This is a product decision
@@ -818,6 +881,7 @@ if __name__ == "__main__":
     check_genre_classify()
     check_categorize_title_fallback()
     check_manual_ingestion()
+    check_owner_placeholder_index_pagination()
     check_worker_routing()
     check_create_testers_parsing()
     check_defer_store()

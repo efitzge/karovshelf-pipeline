@@ -146,6 +146,13 @@ class SupabaseWorkerClient:
         adapter = HTTPAdapter(max_retries=retry, pool_maxsize=8, pool_connections=8)
         self.session.mount("https://", adapter)
 
+        # {owner_id: {lookup_key: book_id}} - see find_owner_placeholder_book's
+        # docstring. Lives for this client instance's lifetime, which in
+        # practice means one batch (a fresh client is made per poll cycle),
+        # so it can never go stale across batches while still saving the
+        # N-times-per-batch refetch within one.
+        self._placeholder_index_cache = {}
+
     def _rest(self, path):
         return "{}/rest/v1/{}".format(self.url, path)
 
@@ -298,6 +305,46 @@ class SupabaseWorkerClient:
             json=payload, timeout=config.HTTP_TIMEOUT)
         response.raise_for_status()
 
+    def _owner_placeholder_index(self, owner_id):
+        """{lookup_key: book_id} of every placeholder this owner already has,
+        fetched once per owner and cached on this client instance.
+
+        Paginated (PostgREST's default 1000-row page previously truncated
+        this silently for a large library, and it used to be re-fetched in
+        full once per record inside a batch's loop - both found 2026-09-11).
+        """
+        cached = self._placeholder_index_cache.get(owner_id)
+        if cached is not None:
+            return cached
+
+        index = {}
+        offset = 0
+        page_size = 1000
+        while True:
+            try:
+                response = self.session.get(
+                    self._rest("library_items"),
+                    params={"owner_id": "eq." + owner_id,
+                            "select": "book_id,book:books!inner(title,authors,is_placeholder)",
+                            "limit": page_size, "offset": offset},
+                    timeout=config.HTTP_TIMEOUT)
+                response.raise_for_status()
+                rows = response.json()
+            except requests.RequestException:
+                break
+            for row in rows:
+                book = row.get("book") or {}
+                if not book.get("is_placeholder"):
+                    continue
+                key = make_lookup_key(book.get("title"), ", ".join(book.get("authors") or []))
+                index[key] = row.get("book_id")
+            if len(rows) < page_size:
+                break
+            offset += page_size
+
+        self._placeholder_index_cache[owner_id] = index
+        return index
+
     def find_owner_placeholder_book(self, owner_id, title, authors):
         """An existing placeholder book this owner already has for (title, authors).
 
@@ -311,23 +358,7 @@ class SupabaseWorkerClient:
         the shared catalogue or another owner's books.
         """
         target_key = make_lookup_key(title, ", ".join(authors or []))
-        try:
-            response = self.session.get(
-                self._rest("library_items"),
-                params={"owner_id": "eq." + owner_id,
-                        "select": "book_id,book:books!inner(title,authors,is_placeholder)"},
-                timeout=config.HTTP_TIMEOUT)
-            response.raise_for_status()
-        except requests.RequestException:
-            return None
-        for row in response.json():
-            book = row.get("book") or {}
-            if not book.get("is_placeholder"):
-                continue
-            existing_key = make_lookup_key(book.get("title"), ", ".join(book.get("authors") or []))
-            if existing_key == target_key:
-                return row.get("book_id")
-        return None
+        return self._owner_placeholder_index(owner_id).get(target_key)
 
     def insert_placeholder_book(self, owner_id, title, authors, spine_text=None, genre=None):
         """A books row that exists only so a library_item has an FK target.
@@ -398,7 +429,14 @@ class SupabaseWorkerClient:
             headers={"Prefer": "resolution=merge-duplicates,return=representation"},
             timeout=config.HTTP_TIMEOUT)
         response.raise_for_status()
-        return response.json()[0]["id"]
+        new_id = response.json()[0]["id"]
+        # Keep the cached index (if this owner's has been fetched already)
+        # in sync, so a later call in the same batch/client lifetime for the
+        # same title reuses this row instead of missing it and re-querying.
+        index = self._placeholder_index_cache.get(owner_id)
+        if index is not None:
+            index[make_lookup_key(title, ", ".join(authors or []))] = new_id
+        return new_id
 
     def supersede_owner_placeholder(self, owner_id, book_id, title, authors):
         """Delete this owner's existing placeholder for (title, authors) now
@@ -433,6 +471,9 @@ class SupabaseWorkerClient:
             self._rest("books"), params={"id": "eq." + old_book_id},
             timeout=config.HTTP_TIMEOUT)
         response.raise_for_status()
+        index = self._placeholder_index_cache.get(owner_id)
+        if index is not None:
+            index.pop(make_lookup_key(title, ", ".join(authors or [])), None)
 
     def upsert_library_item(self, owner_id, book_id, scan_spine_text, scan_legibility,
                             scan_batch_id=None, source_photo_path=None):
