@@ -32,15 +32,23 @@ Rules:
 3. Only then interpret that text into `title` and `author`. If the spine shows
    only a title, return an empty string for `author` - never supply an author
    from memory.
-4. Set `legibility` honestly:
+4. An author's name is very often printed smaller than the title, in a
+   different font, sideways, or tucked at the top or bottom of the spine -
+   it does not have to be prominent to count. Look specifically for a
+   personal name (a surname alone is enough - "LAU", "SACKS") separate from
+   the title wording, and put it in `author` even when it's the smallest
+   text on the spine. Don't confuse this with a publisher or imprint name
+   (e.g. "MAGGID", "PENGUIN") - those are not personal names and belong in
+   `spine_text` only, never in `author`.
+5. Set `legibility` honestly:
    - "clear"   - you can read the text directly and are confident
    - "partial" - some characters are obscured but the reading is well supported
    - "guess"   - you are inferring from fragments, colour, or design
    Do not complete a partially visible title into a book you happen to know
    unless the visible characters genuinely support it; mark such cases "guess".
-5. Skip objects that are not books: DVDs, binders, folders, photo frames,
+6. Skip objects that are not books: DVDs, binders, folders, photo frames,
    ornaments.
-6. If a shelf edge cuts a book off so that no text is readable, omit it.
+7. If a shelf edge cuts a book off so that no text is readable, omit it.
 
 Return every book you find, in left-to-right order.
 """
