@@ -640,6 +640,49 @@ def check_manual_ingestion():
     print()
 
 
+def check_cache_apply_restores_publisher_and_genre():
+    """BookCache.apply() (pure logic, no HTTP - the cached row is just a
+    dict) must restore both `publisher` and the original resolved genre
+    onto a cache-hit record. Before 2026-09-11 it did neither: `publisher`
+    was never set at all (so a cache-hit Judaica book lost the publisher
+    signal categorize() needs - see the "catalogue-publisher signal"
+    fix), and the cached genre was written to a dead `cached_genre`
+    attribute the `genre` property never reads, instead of `llm_genre`,
+    the one it actually prefers."""
+    print("== BookCache.apply() restores publisher and genre from a cache hit ==")
+    from pipeline.cache import BookCache
+    from pipeline.enrich import CatalogueRecord
+
+    record = CatalogueRecord(raw_title="Jeremiah", raw_author="Binyamin Lau",
+                             spine_text="LAU JEREMIAH MAGGID", legibility="clear",
+                             seen_in=["t"])
+    row = {
+        "id": "fake-book-id", "title": "Jeremiah", "authors": ["Binyamin Lau"],
+        "genre": "Philosophy & Religion", "subjects": ["Bible", "Commentaries"],
+        "publisher": "Maggid Books",
+    }
+    # apply() only touches its arguments - safe to call on an unconfigured
+    # (no SUPABASE_URL) instance, same as this file's other pure-logic checks.
+    BookCache.apply(object.__new__(BookCache), record, row)
+
+    assert record.publisher == "Maggid Books", "publisher must be restored from the cached row"
+    assert record.llm_genre == "Philosophy & Religion", (
+        "the cached genre must land in llm_genre (what CatalogueRecord.genre reads), "
+        "not a dead attribute"
+    )
+    assert record.genre == "Philosophy & Religion"
+    print("  cache hit -> record.publisher and record.genre both restored correctly")
+
+    from pipeline.enrich import categorize
+    assert categorize(record.title, record.authors, record.genre,
+                      subjects=record.subjects, spine_text=record.spine_text,
+                      publisher=record.publisher) == "Judaica", (
+        "the restored publisher must be enough on its own to re-derive Judaica on a cache hit"
+    )
+    print("  restored publisher alone is enough to re-derive category Judaica")
+    print()
+
+
 def check_defer_store():
     """defer_store=True must suppress BookCache.store() during enrich() -
     added 2026-09-11 after finding worker.py's process_batch() and
@@ -778,6 +821,7 @@ if __name__ == "__main__":
     check_worker_routing()
     check_create_testers_parsing()
     check_defer_store()
+    check_cache_apply_restores_publisher_and_genre()
     check_pipeline()
     print()
     print("All checks passed.")

@@ -178,6 +178,7 @@ class BookCache:
                                           if record.raw_author else []),
             "genre": record.genre,
             "subjects": record.subjects or [],
+            "publisher": record.publisher,
             "category": categorize(record.title or record.raw_title,
                                    record.authors or ([record.raw_author]
                                                       if record.raw_author else []),
@@ -232,7 +233,14 @@ class BookCache:
         record.isbn = row.get("isbn13") or row.get("isbn10")
         record.cover_url = row.get("cover_url")
         record.subjects = row.get("subjects") or []
-        record.cached_genre = row.get("genre")
+        record.publisher = row.get("publisher")
+        # Not record.cached_genre (a plain attribute CatalogueRecord.genre
+        # never reads - found 2026-09-11): llm_genre is exactly the field
+        # the genre property already prefers over classify_genre(subjects),
+        # so setting it here means a cache hit inherits whatever the
+        # original resolution decided (LLM-derived or not) instead of
+        # silently re-deriving "Uncategorised" from subjects alone.
+        record.llm_genre = row.get("genre")
 
     @property
     def total(self):

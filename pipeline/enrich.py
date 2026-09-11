@@ -343,9 +343,12 @@ class CatalogueRecord:
     # relying on OCR having caught a small imprint logo on the spine.
     publisher: str | None = None
 
-    # Set by the optional batched end-of-scan LLM classification pass
-    # (genre_classify.classify_genres_batch), for records whose catalogue
-    # subjects gave classify_genre() nothing to work with. None otherwise.
+    # Set by either of two things that both mean "trust this over re-deriving
+    # from subjects": the optional batched end-of-scan LLM classification
+    # pass (genre_classify.classify_genres_batch, for records whose
+    # catalogue subjects gave classify_genre() nothing to work with), or
+    # BookCache.apply() restoring a cache hit's already-resolved genre
+    # verbatim (whatever the original resolution decided). None otherwise.
     llm_genre: str | None = None
 
     # The Supabase `books.id` this record resolved to, if any - set by
@@ -370,10 +373,11 @@ class CatalogueRecord:
     def genre(self):
         """A single coarse genre.
 
-        Preference order: the batched end-of-scan LLM classification pass
-        (`llm_genre`, only ever set when the catalogue subjects gave the
-        keyword classifier nothing), then the keyword classifier itself,
-        then "Uncategorised" when neither found anything.
+        Preference order: an already-trusted genre (`llm_genre` - either the
+        batched end-of-scan LLM classification pass, or a cache hit's
+        original resolution restored verbatim by BookCache.apply()), then
+        the keyword classifier, then "Uncategorised" when neither found
+        anything.
         """
         return self.llm_genre or classify_genre(self.subjects) or "Uncategorised"
 
