@@ -255,6 +255,36 @@ def check_series_from_catalogue_subjects():
     print()
 
 
+def check_categorize_publisher_signal():
+    """categorize()'s publisher parameter - added 2026-09-11 after validating
+    the Judaica-routing fix against a real shelf found it under-firing.
+    "Jeremiah" (Binyamin Lau's Maggid Tanakh commentary) matched a real
+    catalogue record whose spine reading only captured the author's surname
+    ("LAU"), never "MAGGID" - but Open Library's own `publisher` field for
+    that exact match says "Maggid Books". Catalogue publisher is a far more
+    reliable Judaica-publisher signal than hoping OCR caught a small spine
+    imprint."""
+    print("== categorize() catalogue-publisher signal (Judaica) ==")
+
+    assert enrich.categorize("Jeremiah", ["Binyamin Lau"], None, spine_text="LAU",
+                             publisher="Maggid Books") == "Judaica", (
+        "a Judaica publisher from the catalogue must be caught even when "
+        "neither the title nor the OCR'd spine text carries any Judaica signal"
+    )
+    print("  catalogue publisher 'Maggid Books' -> Judaica, even with no other signal")
+
+    assert enrich.categorize("Jeremiah", ["Binyamin Lau"], None, spine_text="LAU") is None, (
+        "without the publisher, this exact case must stay unresolved - "
+        "confirms the fix is additive, not a change to the existing rules"
+    )
+    print("  same book, no publisher available -> still None (unchanged behaviour)")
+
+    assert enrich.categorize("SPQR", ["Mary Beard"], None,
+                             publisher="Penguin Random House") is None
+    print("  an ordinary publisher -> no false Judaica match")
+    print()
+
+
 def check_catalogue_match_disambiguation():
     """Guard against binding a short/generic title to a completely unrelated
     real book, when there's no author on the scan to catch it.
@@ -693,6 +723,7 @@ if __name__ == "__main__":
     check_series_detection()
     check_series_prefix_clustering()
     check_series_from_catalogue_subjects()
+    check_categorize_publisher_signal()
     check_catalogue_match_disambiguation()
     check_repetition_guard()
     check_salvage_keeps_spine_only_entries()

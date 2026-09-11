@@ -182,7 +182,8 @@ class BookCache:
                                    record.authors or ([record.raw_author]
                                                       if record.raw_author else []),
                                    record.genre, record.subjects,
-                                   spine_text=record.spine_text),
+                                   spine_text=record.spine_text,
+                                   publisher=record.publisher),
             "first_published": record.first_published,
             "cover_url": record.cover_url,
             "match_source": record.source,

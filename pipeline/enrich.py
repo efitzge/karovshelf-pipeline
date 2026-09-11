@@ -248,7 +248,7 @@ TITLE_NONFICTION_MARKERS = (
 )
 
 
-def categorize(title, authors, genre, subjects=None, spine_text=None):
+def categorize(title, authors, genre, subjects=None, spine_text=None, publisher=None):
     """Fiction / Non-fiction / Judaica, or None when genuinely unsure.
 
     Deliberately conservative: this stays None rather than guess when there's
@@ -257,9 +257,20 @@ def categorize(title, authors, genre, subjects=None, spine_text=None):
     worse than an unlabelled one. `spine_text`, when available, often carries
     the publisher name that the cleaned-up `title` doesn't (e.g. a Koren/
     Maggid book's spine literally says "MAGGID" - the resolved title won't).
+
+    `publisher` is the catalogue's own publisher field (Open Library and
+    Google Books both expose one) - a much more reliable Judaica-publisher
+    signal than hoping the vision model's OCR happened to catch a small
+    imprint logo on the spine. Found 2026-09-11 validating the Judaica
+    routing fix against a real shelf: a whole shelf of Maggid Tanakh
+    commentary volumes (Jeremiah, Isaiah, I/II Kings - by Binyamin Lau)
+    came back mostly "Non-fiction", not "Judaica", because their spine
+    readings only captured the author's surname ("LAU"), never "MAGGID" -
+    OpenLibrary's search API returns `publisher: ["Maggid Books"]` for the
+    exact matched record, but the pipeline never requested or used it.
     """
     haystack = " | ".join(
-        filter(None, [title, spine_text] + list(authors or []) + list(subjects or []))
+        filter(None, [title, spine_text, publisher] + list(authors or []) + list(subjects or []))
     ).lower()
 
     if HEBREW_SCRIPT_RE.search((title or "") + (spine_text or "")):
@@ -325,6 +336,12 @@ class CatalogueRecord:
     # only used as a fallback series_title when detect_series() finds
     # nothing (see cache.py's store()).
     catalogue_series_title: str | None = None
+
+    # The catalogue's own publisher field (Open Library `publisher`, Google
+    # Books `volumeInfo.publisher`) - see categorize()'s own docstring for
+    # why this exists: a much more reliable Judaica-publisher signal than
+    # relying on OCR having caught a small imprint logo on the spine.
+    publisher: str | None = None
 
     # Set by the optional batched end-of-scan LLM classification pass
     # (genre_classify.classify_genres_batch), for records whose catalogue
@@ -641,7 +658,7 @@ def _series_from_subjects(subjects):
     return None
 
 
-OL_FIELDS = "title,author_name,first_publish_year,isbn,cover_i,subject"
+OL_FIELDS = "title,author_name,first_publish_year,isbn,cover_i,subject,publisher"
 
 
 def _score_candidate(record, candidate_title, candidate_authors):
@@ -722,6 +739,8 @@ def _try_openlibrary(session, record, language=None):
             best["cover_i"])
     record.subjects = _clean_subjects(best.get("subject"))
     record.catalogue_series_title = _series_from_subjects(best.get("subject"))
+    publishers = best.get("publisher") or []
+    record.publisher = publishers[0] if publishers else None
     return True
 
 
@@ -768,6 +787,7 @@ def _try_google_books(session, record, language=None):
     links = best.get("imageLinks") or {}
     record.cover_url = links.get("thumbnail") or links.get("smallThumbnail")
     record.subjects = _clean_subjects(best.get("categories"))
+    record.publisher = best.get("publisher")
     return True
 
 

@@ -499,7 +499,8 @@ def process_batch(client, batch, book_cache=None, language="any", progress=None,
         judaica_count = sum(
             1 for r in records
             if enrich.categorize(r.display_title, r.authors, r.genre,
-                                  subjects=r.subjects, spine_text=r.spine_text) == "Judaica"
+                                  subjects=r.subjects, spine_text=r.spine_text,
+                                  publisher=r.publisher) == "Judaica"
         )
         stats = {
             "provider": result.provider,
