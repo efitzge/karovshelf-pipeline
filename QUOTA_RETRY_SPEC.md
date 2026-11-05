@@ -165,7 +165,7 @@ before demand is proven" principle already stated in `MVP_WORKFLOW.md` line
    DST — the hour of buffer absorbs the small drift on the few days a year
    the two DST calendars don't line up exactly). Runs
    `python retry_quota_misses.py` via `cmd.exe` (so stdout/stderr can be
-   redirected), working directory `E:\karovshelf`, output appended to
+   redirected), working directory `E:\Code\karovshelf-pipeline`, output appended to
    `out/quota_retry.log`. Registered with `-StartWhenAvailable` so a
    powered-off/asleep PC catches up next time it's on, and under the
    current user with no stored password (`Run only when user is logged

@@ -242,7 +242,7 @@ being shared as fact.
 ## Scope boundary
 
 This repository does not provide the browser experience; that is the separate
-Next.js app in `E:\karovshelf-web`. The pipeline does write catalogue results
+Next.js app in `E:\Code\karovshelf`. The pipeline does write catalogue results
 to the same Supabase system used by the web app, including `scan_batches`,
 `books`, and `library_items`.
 
