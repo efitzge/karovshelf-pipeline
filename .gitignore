@@ -6,3 +6,18 @@ __pycache__/
 .env
 karovshelf-israel-artwork.zip
 tmp/
+
+# secrets and local config (standard block, added 2026-11-03)
+.env
+.env.*
+!.env.example
+!.env.local.example
+*.pem
+*.key
+accounts.local.txt
+*.local.txt
+.vercel
+supabase/.temp
+# private ops notes, kept outside the repo
+MVP_WORKFLOW.md
+PROJECT_SUMMARY.md
